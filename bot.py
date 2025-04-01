@@ -1,7 +1,6 @@
 import os
 import asyncio
 import logging
-import json
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
@@ -14,6 +13,20 @@ import pytz
 import aiohttp
 import numpy as np
 
+# Flask часть
+from flask import Flask
+import threading
+
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return 'Bot is running on Render!'
+
+def run_flask():
+    app.run(host='0.0.0.0', port=8080)
+
+# Загрузка переменных окружения
 load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -23,22 +36,9 @@ CHAT_ID = os.getenv("CHAT_ID")
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
-TOP_LEAGUE_IDS = [39, 140, 135, 78, 61, 88, 79, 41, 40, 2, 3, 5, 7, 9, 530, 531]
-CACHE_FILE = "sent_predictions.json"
-
-# Загружаем ID уже отправленных матчей
-def load_sent_ids():
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "r") as f:
-            return set(json.load(f))
-    return set()
-
-# Сохраняем ID отправленных матчей
-def save_sent_ids(ids):
-    with open(CACHE_FILE, "w") as f:
-        json.dump(list(ids), f)
-
-sent_predictions = load_sent_ids()
+TOP_LEAGUE_IDS = [
+    39, 140, 135, 78, 61, 88, 79, 41, 40, 2, 3, 5, 7, 9, 530, 531
+]
 
 def monte_carlo_simulation(home_avg, away_avg, simulations=1000):
     success_count = 0
@@ -87,11 +87,6 @@ async def strategy_1():
             if league_id not in TOP_LEAGUE_IDS:
                 continue
 
-            match_id = fixture["fixture"]["id"]
-            if match_id in sent_predictions:
-                continue
-            sent_predictions.add(match_id)
-
             home = fixture["teams"]["home"]
             away = fixture["teams"]["away"]
             match_time = datetime.utcfromtimestamp(fixture["fixture"]["timestamp"])
@@ -112,57 +107,8 @@ async def strategy_1():
                          f"Вероятность ТМ 2.5: {probability:.1%}"
                 )
 
-async def strategy_2():
-    url = "https://api-football-v1.p.rapidapi.com/v3/fixtures"
-    headers = {
-        "X-RapidAPI-Key": RAPIDAPI_KEY,
-        "X-RapidAPI-Host": "api-football-v1.p.rapidapi.com"
-    }
-    params = {"live": "all", "timezone": "UTC"}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers, params=params) as resp:
-            data = await resp.json()
-    fixtures = data.get("response", [])
-    for fixture in fixtures:
-        if fixture["fixture"]["status"]["short"] != "HT":
-            continue
-        goals = fixture.get("goals", {})
-        if goals.get("home") != 0 or goals.get("away") != 0:
-            continue
-        stats = fixture.get("statistics", [])
-        if not stats:
-            continue
-
-        match_id = fixture["fixture"]["id"]
-        if match_id in sent_predictions:
-            continue
-        sent_predictions.add(match_id)
-
-        for team_stats in stats:
-            team_name = team_stats["team"]["name"]
-            stat_list = team_stats["statistics"]
-            shots = next((s["value"] for s in stat_list if s["type"] == "Total Shots"), 0)
-            xg = next((s["value"] for s in stat_list if s["type"].lower() == "expected goals"), 0)
-
-            if shots and int(shots) >= 5 and xg and float(xg) > 0.8:
-                home_xg = float(stats[0]["statistics"][8]["value"])
-                away_xg = float(stats[1]["statistics"][8]["value"])
-                probability = monte_carlo_simulation(home_xg, away_xg)
-
-                if probability >= 0.65:
-                    await bot.send_message(
-                        chat_id=CHAT_ID,
-                        text=f"<b>Стратегия 2 (Монте-Карло):</b> Давление при 0:0\n"
-                             f"{fixture['teams']['home']['name']} vs {fixture['teams']['away']['name']}\n"
-                             f"Команда: {team_name}\n"
-                             f"Удары: {shots}, xG: {xg}\n"
-                             f"Вероятность ТМ 2.5: {probability:.1%}"
-                    )
-
 async def run_strategies():
     await strategy_1()
-    await strategy_2()
-    save_sent_ids(sent_predictions)  # сохраняем обновлённый список
 
 @dp.message(F.text == "/start")
 async def start_handler(msg: types.Message):
@@ -175,15 +121,14 @@ async def predict_handler(msg: types.Message):
 
 async def main():
     print("✅ Бот запущен. Render работает!")
-    await bot.send_message(CHAT_ID, "✅ Бот запущен и готов к работе!")
-
     scheduler = AsyncIOScheduler()
     trigger = CronTrigger(hour="6-16", minute="*/20", timezone="America/Edmonton")
     scheduler.add_job(run_strategies, trigger=trigger)
     scheduler.start()
-
     await dp.start_polling(bot)
 
+# Запуск Flask и бота параллельно
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    threading.Thread(target=run_flask).start()
     asyncio.run(main())
